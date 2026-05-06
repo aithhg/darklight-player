@@ -179,19 +179,33 @@ class M3u8Parser {
   }
 
   /// Build a local m3u8 playlist that references local .ts files.
-  String buildLocalM3u8(List<String> localSegmentPaths, {List<double>? durations}) {
+  String buildLocalM3u8(List<String> localSegmentPaths, {List<double>? durations, Map<int, String>? keyPathsByIndex, Map<int, String>? keyIvsByIndex}) {
     final sb = StringBuffer();
     sb.writeln('#EXTM3U');
     sb.writeln('#EXT-X-VERSION:3');
     sb.writeln('#EXT-X-TARGETDURATION:10');
     sb.writeln('#EXT-X-MEDIA-SEQUENCE:0');
 
+    String? currentKeyPath;
     for (var i = 0; i < localSegmentPaths.length; i++) {
+      // Emit KEY tag when encryption key changes
+      final keyPath = keyPathsByIndex?[i];
+      if (keyPath != currentKeyPath) {
+        currentKeyPath = keyPath;
+        if (keyPath != null) {
+          final iv = keyIvsByIndex?[i];
+          if (iv != null) {
+            sb.writeln('#EXT-X-KEY:METHOD=AES-128,URI="$keyPath",IV=$iv');
+          } else {
+            sb.writeln('#EXT-X-KEY:METHOD=AES-128,URI="$keyPath"');
+          }
+        }
+      }
+
       final duration = (durations != null && i < durations.length)
           ? durations[i]
           : 10.0;
       sb.writeln('#EXTINF:${duration.toStringAsFixed(3)},');
-      // Normalize path separators for mpv compatibility
       sb.writeln(localSegmentPaths[i].replaceAll('\\', '/'));
     }
 
@@ -212,7 +226,7 @@ class M3u8Parser {
   }
 
   String? _extractAttribute(String line, String attr) {
-    final regex = RegExp('$attr=(\\d+)');
+    final regex = RegExp('$attr=([^,]+)');
     return regex.firstMatch(line)?.group(1);
   }
 

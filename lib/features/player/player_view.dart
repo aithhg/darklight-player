@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_mobx/flutter_mobx.dart';
@@ -38,6 +39,8 @@ class _PlayerViewState extends State<PlayerView> {
   late final PlayerController _playerController;
   PlayerPageStore? _pageStore;
   bool _initialized = false;
+  Timer? _hideControlsTimer;
+  static const _autoHideDelay = Duration(seconds: 3);
 
   @override
   void initState() {
@@ -50,6 +53,45 @@ class _PlayerViewState extends State<PlayerView> {
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,
     ]);
+
+    // Keyboard listener for Escape key (desktop back navigation)
+    HardwareKeyboard.instance.addHandler(_handleKeyEvent);
+    _startAutoHideTimer();
+  }
+
+  void _startAutoHideTimer() {
+    _hideControlsTimer?.cancel();
+    _hideControlsTimer = Timer(_autoHideDelay, () {
+      _pageStore?.showControls = false;
+    });
+  }
+
+  void _onUserActivity() {
+    _pageStore?.showControls = true;
+    _startAutoHideTimer();
+  }
+
+  void _onTapVideo() {
+    _pageStore!.toggleControls();
+    if (_pageStore!.showControls) {
+      _startAutoHideTimer();
+    } else {
+      _hideControlsTimer?.cancel();
+    }
+  }
+
+  /// Handler for keyboard events — Escape key triggers back navigation.
+  bool _handleKeyEvent(KeyEvent event) {
+    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.escape) {
+      Navigator.of(context).pop();
+      return true;
+    }
+    return false;
+  }
+
+  void _handleBack() {
+    _pageStore?.saveProgress();
+    Navigator.of(context).pop();
   }
 
   @override
@@ -77,7 +119,8 @@ class _PlayerViewState extends State<PlayerView> {
 
   @override
   void dispose() {
-    // Save progress before leaving
+    _hideControlsTimer?.cancel();
+    HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     _pageStore?.saveProgress();
     _playerController.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -87,19 +130,34 @@ class _PlayerViewState extends State<PlayerView> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Observer(
-        builder: (_) {
-          if (_pageStore == null) return const SizedBox.shrink();
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _handleBack();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: MouseRegion(
+          onHover: (_) => _onUserActivity(),
+          onEnter: (_) => _onUserActivity(),
+          child: Observer(
+            builder: (_) {
+              if (_pageStore == null) return const SizedBox.shrink();
 
-          final showControls = _pageStore!.showControls;
-          final detail = _pageStore!.detail;
+              final showControls = _pageStore!.showControls;
+              final detail = _pageStore!.detail;
 
-          return GestureDetector(
-            onTap: () => _pageStore!.toggleControls(),
-            child: Stack(
-              children: [
+              return Stack(
+                children: [
+                  // Tap-to-toggle area (behind everything else — only fires on
+                  // bare video area, not on controls that sit above it)
+                  Positioned.fill(
+                    child: GestureDetector(
+                      onTap: () => _onTapVideo(),
+                      behavior: HitTestBehavior.translucent,
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
                 // Video surface
                 Center(
                   child: Video(controller: _playerController.videoController),
@@ -131,12 +189,13 @@ class _PlayerViewState extends State<PlayerView> {
                       ],
                     ),
                   ),
-                // Controls overlay
+                // Controls overlay (rendered above the tap-to-toggle area,
+                // so its buttons always receive taps without competing)
                 if (showControls)
                   PlayerControls(
                     controller: _playerController,
                     title: detail?.title ?? widget.title,
-                    onBack: () => Navigator.of(context).pop(),
+                    onBack: () => _handleBack(),
                     onPreviousEpisode: _pageStore!.currentEpisodeIndex > 0
                         ? () => _pageStore!.playPreviousEpisode()
                         : null,
@@ -160,9 +219,10 @@ class _PlayerViewState extends State<PlayerView> {
                     ),
                   ),
               ],
-            ),
-          );
-        },
+            );
+          },
+        ),
+      ),
       ),
     );
   }

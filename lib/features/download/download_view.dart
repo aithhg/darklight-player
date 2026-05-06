@@ -136,7 +136,7 @@ class _DownloadViewState extends State<DownloadView> {
           final task = _tasks[index];
           return _DownloadTile(
             task: task,
-            onStart: task.status == DownloadStatus.pending
+            onStart: (task.status == DownloadStatus.pending || task.status == DownloadStatus.failed)
                 ? () => _startDownload(task.id)
                 : null,
             onPause: task.status == DownloadStatus.downloading
@@ -148,6 +148,10 @@ class _DownloadViewState extends State<DownloadView> {
             onPlay: task.status == DownloadStatus.completed
                 ? () => _playDownload(task)
                 : null,
+            onOpenFolder: () {
+              final folder = Directory(task.savePath).parent.path.replaceAll('/', '\\');
+              Process.start('explorer', [folder]);
+            },
             onCancel: () => _cancelDownload(task.id),
           );
         },
@@ -248,6 +252,7 @@ class _DownloadTile extends StatelessWidget {
   final VoidCallback? onResume;
   final VoidCallback? onPlay;
   final VoidCallback? onCancel;
+  final VoidCallback? onOpenFolder;
 
   const _DownloadTile({
     required this.task,
@@ -256,6 +261,7 @@ class _DownloadTile extends StatelessWidget {
     this.onResume,
     this.onPlay,
     this.onCancel,
+    this.onOpenFolder,
   });
 
   @override
@@ -409,6 +415,13 @@ class _DownloadTile extends StatelessWidget {
             onPressed: onResume,
             color: AppTheme.accent,
             tooltip: '继续',
+          ),
+        if (onOpenFolder != null)
+          IconButton(
+            icon: const Icon(Icons.folder_open_rounded, size: 20),
+            onPressed: onOpenFolder,
+            color: AppTheme.textSecondary,
+            tooltip: '打开文件夹',
           ),
         if (onCancel != null)
           IconButton(

@@ -69,7 +69,13 @@ class DownloadService {
             'completed_at': DateTime.now().toIso8601String(),
           });
         } else {
-          await _db.updateDownload(id, {'status': 'failed', 'error_message': '下载中断'});
+          // Check for partial segment files — m3u8 download in progress
+          final segDir = Directory('${savePath.split(RegExp(r'\.mp4$')).first}/segments');
+          if (segDir.existsSync() && segDir.listSync().any((f) => f.path.endsWith('.ts'))) {
+            await _db.updateDownload(id, {'status': 'paused'});
+          } else {
+            await _db.updateDownload(id, {'status': 'failed', 'error_message': '下载中断'});
+          }
         }
       } else if (status == 'completed' && totalSegments == 0 && totalBytes > 0 && totalBytes < 1024) {
         // Damaged record from old bugs — tiny totalBytes with no segments
@@ -232,8 +238,9 @@ class DownloadService {
     await segDir.create(recursive: true);
 
     final totalSegments = segments.length;
-    var completedSegments = 0;
-    var totalBytesDownloaded = 0;
+    final existingTask = _taskStates[id];
+    var completedSegments = existingTask?.downloadedSegments ?? 0;
+    var totalBytesDownloaded = existingTask?.downloadedBytes ?? 0;
     final localPaths = <String>[];
     final durations = <double>[];
 
@@ -301,34 +308,41 @@ class DownloadService {
 
     flushProgress(force: true);
 
-    // Everything after this point is non-critical — segments are already on disk.
-    // Failures must NOT prevent the download from being marked completed.
+    // Download encryption keys and build local m3u8 with key info.
+    // Key download failure is logged but does not prevent completion.
+    final keyUrlToLocalPath = <String, String>{};
+    final keyPathByIndex = <int, String>{};
+    final keyIvByIndex = <int, String>{};
     try {
-      // Download encryption keys (with 10s timeout per key to avoid hanging)
-      final keyPaths = <String, String>{};
       for (var i = 0; i < segments.length; i++) {
         final seg = segments[i];
-        if (seg.encryptionKeyUrl != null && !keyPaths.containsKey(seg.encryptionKeyUrl)) {
-          final keyPath = '${segDir.path}/key_${keyPaths.length}.key';
-          if (!File(keyPath).existsSync()) {
-            await _dio.download(seg.encryptionKeyUrl!, keyPath, cancelToken: cancelToken)
-                .timeout(const Duration(seconds: 10));
+        final keyUrl = seg.encryptionKeyUrl;
+        if (keyUrl != null) {
+          final localKeyPath = keyUrlToLocalPath[keyUrl] ?? '${segDir.path}/key_${keyUrlToLocalPath.length}.key';
+          if (!File(localKeyPath).existsSync()) {
+            await _dio.download(keyUrl, localKeyPath, cancelToken: cancelToken);
           }
-          keyPaths[seg.encryptionKeyUrl!] = keyPath;
+          keyUrlToLocalPath[keyUrl] = localKeyPath;
+          keyPathByIndex[i] = localKeyPath;
+          if (seg.encryptionIv != null) {
+            keyIvByIndex[i] = seg.encryptionIv!;
+          }
         }
       }
-
-      // Build local m3u8
-      final m3u8Path = savePath.replaceAll(RegExp(r'\.mp4$'), '.m3u8');
-      final localM3u8 = parser.buildLocalM3u8(localPaths, durations: durations);
-      await File(m3u8Path).writeAsString(localM3u8);
-
-      // Fire-and-forget ffmpeg merge
-      _runMergeAsync(segDir.path, localPaths, savePath, m3u8Path);
     } catch (e) {
-      // Non-critical steps failed — segments are safely on disk, keep m3u8 as
-      // fallback if it was written. The download will be marked completed.
+      print('[DownloadService] key download failed, segments may be encrypted: $e');
     }
+
+    final m3u8Path = savePath.replaceAll(RegExp(r'\.mp4$'), '.m3u8');
+    final localM3u8 = parser.buildLocalM3u8(localPaths,
+      durations: durations,
+      keyPathsByIndex: keyPathByIndex.isNotEmpty ? keyPathByIndex : null,
+      keyIvsByIndex: keyIvByIndex.isNotEmpty ? keyIvByIndex : null,
+    );
+    await File(m3u8Path).writeAsString(localM3u8);
+
+    // Fire-and-forget ffmpeg merge
+    _runMergeAsync(segDir.path, localPaths, savePath, m3u8Path);
   }
 
   /// Run ffmpeg merge in background. Success or failure does not affect
@@ -341,7 +355,7 @@ class DownloadService {
           try { await File(m3u8Path).delete(); } catch (_) {}
         }
       } catch (e) {
-        // keep m3u8 as fallback
+        print('[DownloadService] ffmpeg merge failed, keeping m3u8: $e');
       }
     });
   }
@@ -432,6 +446,9 @@ class DownloadService {
     }
     await File(fileListPath).writeAsString(sb.toString());
 
+    // Scale timeout with segment count: 2 min minimum, ~50ms per segment
+    final timeoutSeconds = 120 + (segmentPaths.length * 0.05).ceil();
+
     final process = await Process.start('ffmpeg', [
       '-f', 'concat',
       '-safe', '0',
@@ -445,7 +462,7 @@ class DownloadService {
     int exitCode;
     try {
       exitCode = await process.exitCode.timeout(
-        const Duration(minutes: 2),
+        Duration(seconds: timeoutSeconds),
         onTimeout: () {
           process.kill(ProcessSignal.sigterm);
           return -1;
@@ -503,6 +520,61 @@ class DownloadService {
       status: DownloadStatus.cancelled,
     ));
     await _db.removeDownload(id);
+  }
+
+  /// Estimate download size for a given URL.
+  /// Returns a human-readable string like "3016 分段, 约 3.5 GB" or "约 856 MB".
+  Future<String> estimateSize(String rawUrl) async {
+    try {
+      final resolvedUrl = await _urlResolver.resolve(rawUrl);
+
+      if (_isM3u8Url(resolvedUrl)) {
+        final parser = M3u8Parser(_dio);
+        final playlist = await parser.parse(resolvedUrl);
+        final segments = await parser.resolveNestedSegments(playlist.segments);
+        final count = segments.length;
+
+        // Sample up to 3 segments to estimate average size
+        int totalSample = 0;
+        int sampleCount = 0;
+        for (var i = 0; i < segments.length && sampleCount < 3; i++) {
+          try {
+            final resp = await _dio.head(segments[i].url);
+            final len = int.tryParse(resp.headers.value('content-length') ?? '');
+            if (len != null && len > 0) {
+              totalSample += len;
+              sampleCount++;
+            }
+          } catch (_) {}
+        }
+
+        if (sampleCount > 0) {
+          final estimatedBytes = (totalSample / sampleCount * count).round();
+          return '$count 分段, 约 ${_formatBytes(estimatedBytes)}';
+        }
+        return '$count 分段';
+      } else {
+        try {
+          final resp = await _dio.head(resolvedUrl);
+          final len = int.tryParse(resp.headers.value('content-length') ?? '');
+          if (len != null && len > 0) {
+            return '约 ${_formatBytes(len)}';
+          }
+        } catch (_) {}
+        return '大小未知';
+      }
+    } catch (e) {
+      return '无法估算';
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
   DownloadTask _rowToTask(Map<String, dynamic> r) {

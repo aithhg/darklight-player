@@ -258,125 +258,222 @@ class _DetailViewState extends State<DetailView> {
   void _showDownloadDialog(BuildContext context, DetailStore store) {
     final detail = store.detail!;
     final selected = <int>{};
+    String? estimateText;
+    bool estimating = false;
+    void Function(void Function())? dialogSetState;
+
+    Future<void> doEstimate() async {
+      if (selected.isEmpty) return;
+      final sp = context.read<ServiceProvider>();
+      final firstIndex = selected.first;
+      if (firstIndex >= detail.episodes.length) return;
+      final url = detail.episodes[firstIndex].url;
+      final result = await sp.downloadService.estimateSize(url);
+      dialogSetState?.call(() {
+        estimating = false;
+        if (selected.length == 1) {
+          estimateText = result;
+        } else {
+          estimateText = '${selected.length} 集 | 单集: $result';
+        }
+      });
+    }
+
+    void triggerEstimate() {
+      if (selected.isEmpty) {
+        dialogSetState?.call(() { estimateText = null; estimating = false; });
+        return;
+      }
+      dialogSetState?.call(() { estimateText = null; estimating = true; });
+      doEstimate();
+    }
 
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setState) => AlertDialog(
-          backgroundColor: AppTheme.surface2,
-          title: Text('选择下载集数 (${detail.episodes.length})',
-              style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  color: AppTheme.textPrimary)),
-          content: SizedBox(
-            width: 400,
-            height: 300,
-            child: Column(
-              children: [
-                // Select all / deselect all
-                Row(
-                  children: [
-                    TextButton(
-                      onPressed: () => setState(() {
-                        if (selected.length == detail.episodes.length) {
-                          selected.clear();
-                        } else {
-                          selected.addAll(
-                              List.generate(detail.episodes.length, (i) => i));
-                        }
-                      }),
-                      child: Text(
-                        selected.length == detail.episodes.length
-                            ? '取消全选'
-                            : '全选',
+        builder: (ctx, setDialogState) {
+          dialogSetState = setDialogState;
+          return AlertDialog(
+            backgroundColor: AppTheme.surface2,
+            title: Text('选择下载集数 (${detail.episodes.length})',
+                style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textPrimary)),
+            content: SizedBox(
+              width: 420,
+              height: 340,
+              child: Column(
+                children: [
+                  // Select all / deselect all
+                  Row(
+                    children: [
+                      TextButton(
+                        onPressed: () {
+                          if (selected.length == detail.episodes.length) {
+                            selected.clear();
+                          } else {
+                            selected.addAll(
+                                List.generate(detail.episodes.length, (i) => i));
+                          }
+                          setDialogState(() {});
+                          triggerEstimate();
+                        },
+                        child: Text(
+                          selected.length == detail.episodes.length
+                              ? '取消全选'
+                              : '全选',
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                // Episode grid
-                Expanded(
-                  child: SingleChildScrollView(
-                    child: Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: List.generate(
-                        detail.episodes.length,
-                        (index) {
-                          final isSelected = selected.contains(index);
-                          return InkWell(
-                            onTap: () => setState(() {
-                              if (isSelected) {
-                                selected.remove(index);
-                              } else {
-                                selected.add(index);
-                              }
-                            }),
-                            borderRadius: BorderRadius.circular(6),
-                            child: Container(
-                              constraints:
-                                  const BoxConstraints(minWidth: 64),
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 8),
-                              decoration: BoxDecoration(
-                                color: isSelected
-                                    ? AppTheme.accent.withValues(alpha: 0.2)
-                                    : AppTheme.surface3,
-                                borderRadius: BorderRadius.circular(6),
-                                border: Border.all(
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  // Episode grid
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: List.generate(
+                          detail.episodes.length,
+                          (index) {
+                            final isSelected = selected.contains(index);
+                            return InkWell(
+                              onTap: () {
+                                if (isSelected) {
+                                  selected.remove(index);
+                                } else {
+                                  selected.add(index);
+                                }
+                                setDialogState(() {});
+                                triggerEstimate();
+                              },
+                              borderRadius: BorderRadius.circular(6),
+                              child: Container(
+                                constraints:
+                                    const BoxConstraints(minWidth: 64),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 8),
+                                decoration: BoxDecoration(
                                   color: isSelected
-                                      ? AppTheme.accent
-                                      : AppTheme.border,
-                                ),
-                              ),
-                              child: Center(
-                                child: Text(
-                                  detail.episodes[index].name,
-                                  style: TextStyle(
-                                    fontSize: 13,
+                                      ? AppTheme.accent.withValues(alpha: 0.2)
+                                      : AppTheme.surface3,
+                                  borderRadius: BorderRadius.circular(6),
+                                  border: Border.all(
                                     color: isSelected
                                         ? AppTheme.accent
-                                        : AppTheme.textPrimary,
-                                    fontWeight: isSelected
-                                        ? FontWeight.w600
-                                        : FontWeight.w400,
+                                        : AppTheme.border,
+                                  ),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    detail.episodes[index].name,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: isSelected
+                                          ? AppTheme.accent
+                                          : AppTheme.textPrimary,
+                                      fontWeight: isSelected
+                                          ? FontWeight.w600
+                                          : FontWeight.w400,
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                          );
-                        },
+                            );
+                          },
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ],
+                  // Size estimate section
+                  if (selected.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: AppTheme.surface3,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: estimating
+                          ? const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2, color: AppTheme.accent),
+                                ),
+                                SizedBox(width: 8),
+                                Text('正在估算大小...',
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        color: AppTheme.textTertiary)),
+                              ],
+                            )
+                          : Row(
+                              children: [
+                                const Icon(Icons.storage_rounded,
+                                    size: 14, color: AppTheme.textTertiary),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    estimateText ?? '点击估算',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: estimateText != null
+                                          ? AppTheme.textSecondary
+                                          : AppTheme.textTertiary,
+                                    ),
+                                  ),
+                                ),
+                                if (estimateText == null)
+                                  TextButton(
+                                    onPressed: triggerEstimate,
+                                    style: TextButton.styleFrom(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 8),
+                                      minimumSize: Size.zero,
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                    child: const Text('估算',
+                                        style: TextStyle(fontSize: 12)),
+                                  ),
+                              ],
+                            ),
+                    ),
+                  ],
+                ],
+              ),
             ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('取消'),
-            ),
-            ElevatedButton(
-              onPressed: selected.isEmpty
-                  ? null
-                  : () {
-                      Navigator.pop(ctx);
-                      final episodeIndices = selected.toList()..sort();
-                      store.downloadEpisodes(episodeIndices);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('已添加 ${selected.length} 集到下载队列'),
-                          backgroundColor: AppTheme.surface3,
-                        ),
-                      );
-                    },
-              child: const Text('确认下载'),
-            ),
-          ],
-        ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('取消'),
+              ),
+              ElevatedButton(
+                onPressed: selected.isEmpty
+                    ? null
+                    : () {
+                        Navigator.pop(ctx);
+                        final episodeIndices = selected.toList()..sort();
+                        store.downloadEpisodes(episodeIndices);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content:
+                                Text('已添加 ${selected.length} 集到下载队列'),
+                            backgroundColor: AppTheme.surface3,
+                          ),
+                        );
+                      },
+                child: const Text('确认下载'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
